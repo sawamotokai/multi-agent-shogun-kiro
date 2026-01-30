@@ -186,7 +186,7 @@ wsl --install
 | スクリプト | 用途 | 実行タイミング |
 |-----------|------|---------------|
 | `install.bat` | Windows: WSL2 + Ubuntu のセットアップ | 初回のみ |
-| `first_setup.sh` | tmux、Node.js、Claude Code CLI をインストール | 初回のみ |
+| `first_setup.sh` | tmux、Node.js、Claude Code CLI のインストール + Memory MCP設定 | 初回のみ |
 | `shutsujin_departure.sh` | tmuxセッション作成 + Claude Code起動 + 指示書読み込み | 毎日 |
 
 ### `install.bat` が自動で行うこと：
@@ -214,6 +214,7 @@ wsl --install
 | 要件 | インストール方法 | 備考 |
 |------|-----------------|------|
 | WSL2 + Ubuntu | PowerShellで `wsl --install` | Windowsのみ |
+| Ubuntuをデフォルトに設定 | `wsl --set-default Ubuntu` | スクリプトの動作に必要 |
 | tmux | `sudo apt install tmux` | ターミナルマルチプレクサ |
 | Node.js v20+ | `nvm install 20` | Claude Code CLIに必要 |
 | Claude Code CLI | `npm install -g @anthropic-ai/claude-code` | Anthropic公式CLI |
@@ -359,6 +360,7 @@ screenshot:
 - どの足軽でも任意のプロジェクトを担当可能
 - エージェント切り替え時もコンテキスト継続
 - 関心の分離が明確
+- セッション間の知識永続化
 
 ### 汎用コンテキストテンプレート
 
@@ -374,7 +376,10 @@ screenshot:
 | Decisions | 決定事項と理由の記録 |
 | Notes | 自由記述のメモ・気づき |
 
-統一フォーマットにより、どのプロジェクトでも同じ構造で情報を参照可能。
+この統一フォーマットにより：
+- どのエージェントでも素早くオンボーディング可能
+- すべてのプロジェクトで一貫した情報管理
+- 足軽間の作業引き継ぎが容易
 
 ---
 
@@ -394,23 +399,27 @@ screenshot:
 
 ### なぜ階層構造（将軍→家老→足軽）なのか
 
-1. **単一責任**: 各役割が明確に分離され、混乱しない
-2. **スケーラビリティ**: 足軽を増やしても構造が崩れない
-3. **障害分離**: 1体の足軽が失敗しても他に影響しない
-4. **人間への報告一元化**: 将軍だけが人間とやり取りするため、情報が整理される
+1. **即座の応答**: 将軍は即座に委譲し、あなたに制御を返す
+2. **並列実行**: 家老が複数の足軽に同時分配
+3. **単一責任**: 各役割が明確に分離され、混乱しない
+4. **スケーラビリティ**: 足軽を増やしても構造が崩れない
+5. **障害分離**: 1体の足軽が失敗しても他に影響しない
+6. **人間への報告一元化**: 将軍だけが人間とやり取りするため、情報が整理される
 
 ### なぜ YAML + send-keys なのか
 
-1. **ポーリング不要**: イベント駆動でAPIコストを削減
-2. **状態の永続化**: YAMLファイルでタスク状態を追跡可能
-3. **デバッグ容易**: 人間がYAMLを直接読んで状況把握できる
-4. **競合回避**: 各足軽に専用ファイルを割り当て
+1. **状態の永続化**: YAMLファイルで構造化通信し、エージェント再起動にも耐える
+2. **ポーリング不要**: イベント駆動でAPIコストを削減
+3. **割り込み防止**: エージェント同士やあなたの入力への割り込みを防止
+4. **デバッグ容易**: 人間がYAMLを直接読んで状況把握できる
+5. **競合回避**: 各足軽に専用ファイルを割り当て
 
 ### なぜ dashboard.md は家老のみが更新するのか
 
 1. **単一更新者**: 競合を防ぐため、更新責任者を1人に限定
 2. **情報集約**: 家老は全足軽の報告を受ける立場なので全体像を把握
-3. **割り込み防止**: 将軍が更新すると、殿の入力中に割り込む恐れあり
+3. **一貫性**: すべての更新が1つの品質ゲートを通過
+4. **割り込み防止**: 将軍が更新すると、殿の入力中に割り込む恐れあり
 
 ---
 
@@ -475,6 +484,8 @@ claude mcp add github -e GITHUB_PERSONAL_ACCESS_TOKEN=your_pat_here -- npx -y @m
 claude mcp add sequential-thinking -- npx -y @modelcontextprotocol/server-sequential-thinking
 
 # 5. Memory - セッション間の長期記憶（推奨！）
+# ✅ first_setup.sh で自動設定済み
+# 手動で再設定する場合:
 claude mcp add memory -e MEMORY_FILE_PATH="$PWD/memory/shogun_memory.jsonl" -- npx -y @modelcontextprotocol/server-memory
 ```
 
@@ -554,7 +565,8 @@ language: en   # 日本語 + 英訳併記
 │      │                                                              │
 │      ├── tmuxのチェック/インストール                                  │
 │      ├── Node.js v20+のチェック/インストール (nvm経由)                │
-│      └── Claude Code CLIのチェック/インストール                      │
+│      ├── Claude Code CLIのチェック/インストール                      │
+│      └── Memory MCPサーバー設定                                      │
 │                                                                     │
 ├─────────────────────────────────────────────────────────────────────┤
 │                      毎日の起動（毎日実行）                           │
@@ -633,8 +645,8 @@ tmux kill-session -t multiagent
 `first_setup.sh` を実行すると、以下のエイリアスが `~/.bashrc` に自動追加されます：
 
 ```bash
-alias css='cd /mnt/c/tools/multi-agent-shogun && ./shutsujin_departure.sh'  # セットアップ+出陣
-alias csm='cd /mnt/c/tools/multi-agent-shogun'                              # ディレクトリ移動のみ
+alias css='tmux attach-session -t shogun'      # 将軍ウィンドウの起動
+alias csm='tmux attach-session -t multiagent'  # 家老・足軽ウィンドウの起動
 ```
 
 ※ エイリアスを反映するには `source ~/.bashrc` を実行するか、PowerShellで `wsl --shutdown` してからターミナルを開き直してください。

@@ -397,6 +397,8 @@ Skills are not included in this repository by default.
 As you use the system, skill candidates will appear in `dashboard.md`.
 Review and approve them to grow your personal skill library.
 
+Skills can be invoked with `/skill-name`. Just tell the Shogun: "run `/skill-name`".
+
 ---
 
 ## 🏛️ Design Philosophy
@@ -407,19 +409,24 @@ The Shogun → Karo → Ashigaru hierarchy exists for:
 
 1. **Immediate Response**: Shogun delegates instantly and returns control to you
 2. **Parallel Execution**: Karo distributes to multiple Ashigaru simultaneously
-3. **Separation of Concerns**: Shogun decides "what", Karo decides "who"
+3. **Separation of Concerns**: Each role is clearly defined — Shogun decides "what", Karo decides "who"
+4. **Scalability**: Adding more Ashigaru doesn't break the structure
+5. **Fault Isolation**: One Ashigaru failing doesn't affect others
+6. **Centralized Reporting**: Only Shogun communicates with you, keeping information organized
 
 ### Why YAML + send-keys?
 
-- **YAML files**: Structured communication that survives agent restarts
+- **YAML files**: Structured communication that survives agent restarts and is human-readable for debugging
 - **send-keys**: Event-driven wakeups (no polling = no wasted API calls)
 - **No direct calls**: Agents can't interrupt each other or your input
+- **Conflict avoidance**: Each Ashigaru has dedicated files, preventing race conditions
 
 ### Why Only Karo Updates Dashboard?
 
 - **Single responsibility**: One writer = no conflicts
 - **Information hub**: Karo receives all reports, knows the full picture
 - **Consistency**: All updates go through one quality gate
+- **No interruptions**: Prevents disrupting your input when Shogun would otherwise update the dashboard
 
 ### How Skills Work
 
@@ -431,12 +438,18 @@ Skills (`.claude/commands/`) are **not committed to this repository** by design.
 - No one-size-fits-all solution
 
 **How to create new skills:**
-1. Ashigaru report "skill candidates" when they notice repeatable patterns
-2. Candidates appear in `dashboard.md` under "Skill Candidates"
-3. You review and approve (or reject)
-4. Approved skills are created by Karo
 
-This keeps skills **user-driven** — only what you find useful gets added.
+```
+Ashigaru notices a repeatable pattern during work
+    ↓
+Candidate appears in dashboard.md under "Skill Candidates"
+    ↓
+You (the Lord) review the candidate
+    ↓
+If approved, Karo creates the skill
+```
+
+Skills are **user-driven** — they only grow when you decide they're useful. Automatic growth would make them unmanageable, so only what you explicitly approve gets added.
 
 ---
 
@@ -622,6 +635,20 @@ tmux kill-session -t multiagent
 # Start fresh
 ./shutsujin_departure.sh
 ```
+
+</details>
+
+<details>
+<summary><b>Convenient Aliases</b> (Click to expand)</summary>
+
+Running `first_setup.sh` automatically adds these aliases to `~/.bashrc`:
+
+```bash
+alias css='cd /mnt/c/tools/multi-agent-shogun && ./shutsujin_departure.sh'  # Setup + deploy
+alias csm='cd /mnt/c/tools/multi-agent-shogun'                              # Navigate to directory only
+```
+
+*To apply aliases, run `source ~/.bashrc` or restart your terminal. On WSL, run `wsl --shutdown` in PowerShell first — simply closing the window does not terminate WSL.*
 
 </details>
 
