@@ -10,6 +10,9 @@
 
 set -e
 
+# 呼び出し元のディレクトリを保存（プロジェクトルートとして使用）
+CALLER_DIR="$(pwd)"
+
 # スクリプトのディレクトリを取得
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -95,6 +98,7 @@ KESSEN_MODE=false
 SHOGUN_NO_THINKING=false
 SILENT_MODE=false
 SHELL_OVERRIDE=""
+PROJECT_ROOT=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -122,6 +126,15 @@ while [[ $# -gt 0 ]]; do
             SILENT_MODE=true
             shift
             ;;
+        -p|--project)
+            if [[ -n "$2" && "$2" != -* ]]; then
+                PROJECT_ROOT="$2"
+                shift 2
+            else
+                echo "エラー: -p/--project オプションにはディレクトリパスを指定してください"
+                exit 1
+            fi
+            ;;
         -shell|--shell)
             if [[ -n "$2" && "$2" != -* ]]; then
                 SHELL_OVERRIDE="$2"
@@ -140,6 +153,8 @@ while [[ $# -gt 0 ]]; do
             echo "オプション:"
             echo "  -c, --clean         キューとダッシュボードをリセットして起動（クリーンスタート）"
             echo "                      未指定時は前回の状態を維持して起動"
+            echo "  -p, --project DIR   プロジェクトルートディレクトリを指定"
+            echo "                      未指定時は現在のディレクトリを使用"
             echo "  -k, --kessen        決戦の陣（全足軽をOpusで起動）"
             echo "                      未指定時は平時の陣（足軽1-4=Sonnet, 足軽5-8=Opus）"
             echo "  -s, --setup-only    tmuxセッションのセットアップのみ（Claude起動なし）"
@@ -199,6 +214,17 @@ if [ -n "$SHELL_OVERRIDE" ]; then
         echo "エラー: -shell オプションには bash または zsh を指定してください（指定値: $SHELL_OVERRIDE）"
         exit 1
     fi
+fi
+
+# プロジェクトルートの設定（-p オプション優先、未指定時は呼び出し元ディレクトリ）
+if [ -z "$PROJECT_ROOT" ]; then
+    PROJECT_ROOT="$CALLER_DIR"
+fi
+# 絶対パスに変換
+PROJECT_ROOT="$(cd "$PROJECT_ROOT" 2>/dev/null && pwd)"
+if [ -z "$PROJECT_ROOT" ]; then
+    echo "エラー: プロジェクトディレクトリが見つかりません"
+    exit 1
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -463,7 +489,7 @@ fi
 # Wait for shell to initialize (macOS can be slow - up to 10+ seconds)
 sleep 12
 SHOGUN_PROMPT=$(generate_prompt "将軍" "magenta" "$SHELL_SETTING")
-tmux send-keys -t shogun:main "cd \"$(pwd)\" && export PS1='${SHOGUN_PROMPT}' && clear" Enter
+tmux send-keys -t shogun:main "cd \"${PROJECT_ROOT}\" && export PS1='${SHOGUN_PROMPT}' && clear" Enter
 tmux select-pane -t shogun:main -P 'bg=#002b36'  # 将軍の Solarized Dark
 tmux set-option -p -t shogun:main @agent_id "shogun"
 
@@ -569,7 +595,7 @@ fi
 
 # Wait for shells to initialize before sending commands
 # macOS terminals can be slow to start (10+ seconds)
-sleep 12
+sleep 30
 
 for i in {0..8}; do
     p=$((PANE_BASE + i))
@@ -578,8 +604,8 @@ for i in {0..8}; do
     tmux set-option -p -t "multiagent:agents.${p}" @model_name "${MODEL_NAMES[$i]}"
     tmux set-option -p -t "multiagent:agents.${p}" @current_task ""
     PROMPT_STR=$(generate_prompt "${PANE_LABELS[$i]}" "${PANE_COLORS[$i]}" "$SHELL_SETTING")
-    tmux send-keys -t "multiagent:agents.${p}" "cd \"$(pwd)\" && export PS1='${PROMPT_STR}' && clear" Enter
-    sleep 0.2  # Small delay between panes
+    tmux send-keys -t "multiagent:agents.${p}" "cd \"${PROJECT_ROOT}\" && export PS1='${PROMPT_STR}' && clear" Enter
+    sleep 0.5  # Delay between panes (increased for slow terminals)
 done
 
 # pane-border-format でモデル名を常時表示
