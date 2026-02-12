@@ -772,23 +772,22 @@ INOTIFY_TIMEOUT=30
 while true; do
     set +e
     if [ "$FILE_WATCHER" = "fswatch" ]; then
-        # macOS: fswatch with timeout via background + sleep + kill
-        fswatch -1 --event Updated "$INBOX" &
-        FSWATCH_PID=$!
-        sleep "$INOTIFY_TIMEOUT" &
-        SLEEP_PID=$!
-        wait -n "$FSWATCH_PID" "$SLEEP_PID" 2>/dev/null
-        rc=$?
-        kill "$FSWATCH_PID" 2>/dev/null
-        kill "$SLEEP_PID" 2>/dev/null
-        wait "$FSWATCH_PID" 2>/dev/null
-        wait "$SLEEP_PID" 2>/dev/null
-        # rc=0 means fswatch detected a change, otherwise timeout
-        if [ $rc -eq 0 ]; then
-            rc=0
-        else
-            rc=2
-        fi
+        # macOS: fswatch is unreliable with atomic writes (tmp+rename replaces inode).
+        # Use short polling interval instead — check every 2 seconds, timeout at INOTIFY_TIMEOUT.
+        local poll_elapsed=0
+        local last_mtime=""
+        last_mtime=$(stat -f %m "$INBOX" 2>/dev/null || echo "0")
+        rc=2  # default: timeout
+        while [ $poll_elapsed -lt $INOTIFY_TIMEOUT ]; do
+            sleep 2
+            poll_elapsed=$((poll_elapsed + 2))
+            local cur_mtime=""
+            cur_mtime=$(stat -f %m "$INBOX" 2>/dev/null || echo "0")
+            if [ "$cur_mtime" != "$last_mtime" ]; then
+                rc=0  # file changed
+                break
+            fi
+        done
     else
         # Linux: inotifywait
         inotifywait -q -t "$INOTIFY_TIMEOUT" -e modify -e close_write "$INBOX" 2>/dev/null
