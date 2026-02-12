@@ -455,6 +455,12 @@ EOF
 else
     log_info "📊 前回のダッシュボードを維持"
 fi
+
+# Symlink dashboard.md into project root for easy access
+if [ "$PROJECT_ROOT" != "$SCRIPT_DIR" ] && [ ! -e "$PROJECT_ROOT/dashboard.md" ]; then
+    ln -sf "$SCRIPT_DIR/dashboard.md" "$PROJECT_ROOT/dashboard.md"
+    log_info "📊 dashboard.md → プロジェクトルートにシンボリックリンク作成"
+fi
 echo ""
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -30,14 +30,31 @@ fi
 MSG_ID="msg_$(date +%Y%m%d_%H%M%S)_$(head -c 4 /dev/urandom | xxd -p)"
 TIMESTAMP=$(date "+%Y-%m-%dT%H:%M:%S")
 
-# Atomic write with flock (3 retries)
+# Atomic write with file locking (3 retries)
+# macOS: use mkdir-based lock (atomic on all filesystems)
+# Linux: use flock if available, fallback to mkdir
 attempt=0
 max_attempts=3
 
-while [ $attempt -lt $max_attempts ]; do
-    if (
-        flock -w 5 200 || exit 1
+_acquire_lock() {
+    local lockdir="${LOCKFILE}.d"
+    local deadline=$(($(date +%s) + 5))
+    while [ $(date +%s) -lt $deadline ]; do
+        if mkdir "$lockdir" 2>/dev/null; then
+            trap "rmdir '$lockdir' 2>/dev/null" EXIT
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
 
+_release_lock() {
+    rmdir "${LOCKFILE}.d" 2>/dev/null || true
+}
+
+while [ $attempt -lt $max_attempts ]; do
+    if _acquire_lock; then
         # Add message via python3 (unified YAML handling)
         python3 -c "
 import yaml, sys
@@ -86,13 +103,17 @@ try:
 except Exception as e:
     print(f'ERROR: {e}', file=sys.stderr)
     sys.exit(1)
-" || exit 1
-
-    ) 200>"$LOCKFILE"; then
-        # Success
-        exit 0
+"
+        result=$?
+        _release_lock
+        if [ $result -eq 0 ]; then
+            exit 0
+        else
+            echo "[inbox_write] Python write failed for $INBOX" >&2
+            exit 1
+        fi
     else
-        # Lock timeout or error
+        # Lock timeout
         attempt=$((attempt + 1))
         if [ $attempt -lt $max_attempts ]; then
             echo "[inbox_write] Lock timeout for $INBOX (attempt $attempt/$max_attempts), retrying..." >&2

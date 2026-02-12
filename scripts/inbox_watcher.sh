@@ -48,11 +48,17 @@ if [ "${__INBOX_WATCHER_TESTING__:-}" != "1" ]; then
 
     echo "[$(date)] inbox_watcher started — agent: $AGENT_ID, pane: $PANE_TARGET, cli: $CLI_TYPE" >&2
 
-    # Ensure inotifywait is available
-    if ! command -v inotifywait &>/dev/null; then
-        echo "[inbox_watcher] ERROR: inotifywait not found. Install: sudo apt install inotify-tools" >&2
+    # Ensure file watcher is available (inotifywait on Linux, fswatch on macOS)
+    if command -v inotifywait &>/dev/null; then
+        FILE_WATCHER="inotifywait"
+    elif command -v fswatch &>/dev/null; then
+        FILE_WATCHER="fswatch"
+    else
+        echo "[inbox_watcher] ERROR: Neither inotifywait nor fswatch found." >&2
+        echo "[inbox_watcher] Install: Linux: sudo apt install inotify-tools / macOS: brew install fswatch" >&2
         exit 1
     fi
+    echo "[$(date)] Using file watcher: $FILE_WATCHER" >&2
 fi
 
 # ─── Escalation state ───
@@ -203,9 +209,9 @@ normalize_special_command() {
 }
 
 enqueue_recovery_task_assigned() {
-    (
-        flock -x 200
-        INBOX_PATH="$INBOX" AGENT_ID="$AGENT_ID" python3 - << 'PY'
+    local lockdir="${LOCKFILE}.d"
+    mkdir "$lockdir" 2>/dev/null || true
+    INBOX_PATH="$INBOX" AGENT_ID="$AGENT_ID" python3 - << 'PY'
 import datetime
 import os
 import uuid
@@ -261,7 +267,7 @@ except Exception:
     # Best-effort safety net only. Primary /clear delivery must not fail here.
     print("ERROR")
 PY
-    ) 200>"$LOCKFILE" 2>/dev/null
+    rmdir "$lockdir" 2>/dev/null || true
 }
 
 no_idle_full_read() {
@@ -295,9 +301,10 @@ PY
 # Returns JSON lines: {"count": N, "has_special": true/false, "specials": [...]}
 # Test anchor for bats awk pattern: get_unread_info\\(\\)
 get_unread_info() {
-    (
-        flock -x 200
-        INBOX_PATH="$INBOX" python3 - << 'PY'
+    local lockdir="${LOCKFILE}.d"
+    local got_lock=0
+    if mkdir "$lockdir" 2>/dev/null; then got_lock=1; fi
+    INBOX_PATH="$INBOX" python3 - << 'PY'
 import json
 import os
 import yaml
@@ -337,7 +344,7 @@ try:
 except Exception:
     print(json.dumps({"count": 0, "specials": []}))
 PY
-    ) 200>"$LOCKFILE" 2>/dev/null
+    [ "$got_lock" -eq 1 ] && rmdir "$lockdir" 2>/dev/null
 }
 
 # ─── Send CLI command via pty direct write ───
@@ -759,17 +766,34 @@ if [ "${__INBOX_WATCHER_TESTING__:-}" != "1" ]; then
 # ─── Startup: process any existing unread messages ───
 process_unread_once
 
-# ─── Main loop: event-driven via inotifywait ───
-# Timeout 30s: WSL2 /mnt/c/ can miss inotify events.
-# Shorter timeout = faster escalation retry for stuck agents.
+# ─── Main loop: event-driven via inotifywait/fswatch ───
 INOTIFY_TIMEOUT=30
 
 while true; do
-    # Block until file is modified OR timeout (safety net for WSL2)
-    # set +e: inotifywait returns 2 on timeout, which would kill script under set -e
     set +e
-    inotifywait -q -t "$INOTIFY_TIMEOUT" -e modify -e close_write "$INBOX" 2>/dev/null
-    rc=$?
+    if [ "$FILE_WATCHER" = "fswatch" ]; then
+        # macOS: fswatch with timeout via background + sleep + kill
+        fswatch -1 --event Updated "$INBOX" &
+        FSWATCH_PID=$!
+        sleep "$INOTIFY_TIMEOUT" &
+        SLEEP_PID=$!
+        wait -n "$FSWATCH_PID" "$SLEEP_PID" 2>/dev/null
+        rc=$?
+        kill "$FSWATCH_PID" 2>/dev/null
+        kill "$SLEEP_PID" 2>/dev/null
+        wait "$FSWATCH_PID" 2>/dev/null
+        wait "$SLEEP_PID" 2>/dev/null
+        # rc=0 means fswatch detected a change, otherwise timeout
+        if [ $rc -eq 0 ]; then
+            rc=0
+        else
+            rc=2
+        fi
+    else
+        # Linux: inotifywait
+        inotifywait -q -t "$INOTIFY_TIMEOUT" -e modify -e close_write "$INBOX" 2>/dev/null
+        rc=$?
+    fi
     set -e
 
     # rc=0: event fired (instant delivery)
