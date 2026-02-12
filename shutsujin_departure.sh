@@ -20,10 +20,18 @@ if [ -f "./config/settings.yaml" ]; then
     LANG_SETTING=$(grep "^language:" ./config/settings.yaml 2>/dev/null | awk '{print $2}' || echo "ja")
 fi
 
-# シェル設定を読み取り（デフォルト: bash）
+# シェル設定を読み取り（デフォルト: 自動検出）
 SHELL_SETTING="bash"
+# Auto-detect shell from $SHELL environment variable
+if [[ "$SHELL" == *"zsh"* ]]; then
+    SHELL_SETTING="zsh"
+fi
+# Override from settings.yaml if specified
 if [ -f "./config/settings.yaml" ]; then
-    SHELL_SETTING=$(grep "^shell:" ./config/settings.yaml 2>/dev/null | awk '{print $2}' || echo "bash")
+    _yaml_shell=$(grep "^shell:" ./config/settings.yaml 2>/dev/null | awk '{print $2}')
+    if [[ -n "$_yaml_shell" ]]; then
+        SHELL_SETTING="$_yaml_shell"
+    fi
 fi
 
 # CLI Adapter読み込み（Multi-CLI Support）
@@ -452,6 +460,8 @@ if ! tmux has-session -t shogun 2>/dev/null; then
 fi
 
 # 将軍ペインはウィンドウ名 "main" で指定（base-index 1 環境でも動く）
+# Wait for shell to initialize (macOS can be slow - up to 10+ seconds)
+sleep 12
 SHOGUN_PROMPT=$(generate_prompt "将軍" "magenta" "$SHELL_SETTING")
 tmux send-keys -t shogun:main "cd \"$(pwd)\" && export PS1='${SHOGUN_PROMPT}' && clear" Enter
 tmux select-pane -t shogun:main -P 'bg=#002b36'  # 将軍の Solarized Dark
@@ -557,6 +567,10 @@ if [ "$CLI_ADAPTER_LOADED" = true ]; then
     done
 fi
 
+# Wait for shells to initialize before sending commands
+# macOS terminals can be slow to start (10+ seconds)
+sleep 12
+
 for i in {0..8}; do
     p=$((PANE_BASE + i))
     tmux select-pane -t "multiagent:agents.${p}" -T "${PANE_TITLES[$i]}"
@@ -565,6 +579,7 @@ for i in {0..8}; do
     tmux set-option -p -t "multiagent:agents.${p}" @current_task ""
     PROMPT_STR=$(generate_prompt "${PANE_LABELS[$i]}" "${PANE_COLORS[$i]}" "$SHELL_SETTING")
     tmux send-keys -t "multiagent:agents.${p}" "cd \"$(pwd)\" && export PS1='${PROMPT_STR}' && clear" Enter
+    sleep 0.2  # Small delay between panes
 done
 
 # pane-border-format でモデル名を常時表示
@@ -595,6 +610,10 @@ if [ "$SETUP_ONLY" = false ]; then
 
     log_war "👑 全軍に Claude Code を召喚中..."
 
+    # Wait for all shells to be fully ready before sending CLI commands
+    log_info "  シェル初期化待機中（10秒）..."
+    sleep 10
+
     # 将軍: CLI Adapter経由でコマンド構築
     _shogun_cli_type="claude"
     _shogun_cmd="claude --model opus --dangerously-skip-permissions"
@@ -614,7 +633,7 @@ if [ "$SETUP_ONLY" = false ]; then
     fi
 
     # 少し待機（安定のため）
-    sleep 1
+    sleep 2
 
     # 家老（pane 0）: CLI Adapter経由でコマンド構築
     p=$((PANE_BASE + 0))
@@ -628,6 +647,7 @@ if [ "$SETUP_ONLY" = false ]; then
     tmux send-keys -t "multiagent:agents.${p}" "$_karo_cmd"
     tmux send-keys -t "multiagent:agents.${p}" Enter
     log_info "  └─ 家老（${_karo_cli_type}）、召喚完了"
+    sleep 0.5
 
     if [ "$KESSEN_MODE" = true ]; then
         # 決戦の陣: CLI Adapter経由（claudeはOpus強制）
@@ -647,6 +667,7 @@ if [ "$SETUP_ONLY" = false ]; then
             tmux set-option -p -t "multiagent:agents.${p}" @agent_cli "$_ashi_cli_type"
             tmux send-keys -t "multiagent:agents.${p}" "$_ashi_cmd"
             tmux send-keys -t "multiagent:agents.${p}" Enter
+            sleep 0.3  # Delay between ashigaru commands
         done
         log_info "  └─ 足軽1-8（決戦の陣）、召喚完了"
     else
@@ -666,6 +687,7 @@ if [ "$SETUP_ONLY" = false ]; then
             tmux set-option -p -t "multiagent:agents.${p}" @agent_cli "$_ashi_cli_type"
             tmux send-keys -t "multiagent:agents.${p}" "$_ashi_cmd"
             tmux send-keys -t "multiagent:agents.${p}" Enter
+            sleep 0.3  # Delay between ashigaru commands
         done
         log_info "  └─ 足軽1-8（平時の陣）、召喚完了"
     fi

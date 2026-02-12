@@ -71,6 +71,9 @@ EOFYAML
         kimi)
             cat "$PARTS_DIR/cli_specific/kimi_tools.md" >> "$output_path"
             ;;
+        kiro)
+            cat "$PARTS_DIR/cli_specific/kiro_tools.md" >> "$output_path"
+            ;;
     esac
 
     echo "  ✅ Created: $output_filename"
@@ -95,6 +98,11 @@ build_instruction_file "copilot" "ashigaru" "copilot-ashigaru.md"
 build_instruction_file "kimi" "shogun" "kimi-shogun.md"
 build_instruction_file "kimi" "karo" "kimi-karo.md"
 build_instruction_file "kimi" "ashigaru" "kimi-ashigaru.md"
+
+# Build Kiro CLI instruction files
+build_instruction_file "kiro" "shogun" "kiro-shogun.md"
+build_instruction_file "kiro" "karo" "kiro-karo.md"
+build_instruction_file "kiro" "ashigaru" "kiro-ashigaru.md"
 
 # ============================================================
 # AGENTS.md generation (Codex auto-load file)
@@ -217,10 +225,43 @@ EOFYAML
     echo "  ✅ Created: agents/default/agent.yaml"
 }
 
+# ============================================================
+# KIRO.md generation (Kiro CLI auto-load file)
+# ============================================================
+# Kiro CLIはリポジトリルートのKIRO.mdを自動読み込みする。
+# CLAUDE.mdを正本とし、Claude固有部分をKiro固有に置換して生成。
+generate_kiro_md() {
+    local output_path="$ROOT_DIR/KIRO.md"
+    local claude_md="$ROOT_DIR/CLAUDE.md"
+
+    echo "Generating: KIRO.md (Kiro CLI auto-load)"
+
+    if [ ! -f "$claude_md" ]; then
+        echo "  ⚠️  CLAUDE.md not found. Skipping KIRO.md generation."
+        return 1
+    fi
+
+    # Normalize line endings to LF to keep tracked auto-load files stable across platforms.
+    sed \
+        -e 's|CLAUDE\.md|KIRO.md|g' \
+        -e 's|CLAUDE\.local\.md|KIRO.local.md|g' \
+        -e 's|instructions/shogun\.md|instructions/generated/kiro-shogun.md|g' \
+        -e 's|instructions/karo\.md|instructions/generated/kiro-karo.md|g' \
+        -e 's|instructions/ashigaru\.md|instructions/generated/kiro-ashigaru.md|g' \
+        -e 's|~/.claude/|~/.kiro/|g' \
+        -e 's|\.claude\.json|.kiro/config.json|g' \
+        -e 's|\.mcp\.json|settings/mcp.json|g' \
+        -e 's|Claude Code|Kiro CLI|g' \
+        "$claude_md" | tr -d '\r' > "$output_path"
+
+    echo "  ✅ Created: KIRO.md"
+}
+
 # Generate CLI auto-load files
 generate_agents_md
 generate_copilot_instructions
 generate_kimi_instructions
+generate_kiro_md
 
 echo ""
 echo "=== Build Complete ==="
@@ -234,3 +275,4 @@ echo "CLI auto-load files:"
 [ -f "$ROOT_DIR/.github/copilot-instructions.md" ] && ls -lh "$ROOT_DIR/.github/copilot-instructions.md"
 [ -f "$ROOT_DIR/agents/default/system.md" ] && ls -lh "$ROOT_DIR/agents/default/system.md"
 [ -f "$ROOT_DIR/agents/default/agent.yaml" ] && ls -lh "$ROOT_DIR/agents/default/agent.yaml"
+[ -f "$ROOT_DIR/KIRO.md" ] && ls -lh "$ROOT_DIR/KIRO.md"

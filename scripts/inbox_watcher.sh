@@ -151,7 +151,7 @@ should_throttle_nudge() {
 
 is_valid_cli_type() {
     case "${1:-}" in
-        claude|codex|copilot|kimi) return 0 ;;
+        claude|codex|copilot|kimi|kiro) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -360,6 +360,27 @@ send_cli_command() {
     # CLI別コマンド変換
     local actual_cmd="$cmd"
     case "$effective_cli" in
+        kiro)
+            # Kiro: /clear requires y/n confirmation prompt
+            if [[ "$cmd" == "/clear" ]]; then
+                echo "[$(date)] [SEND-KEYS] Kiro /clear: sending /clear + y confirmation for $AGENT_ID" >&2
+                timeout 5 tmux send-keys -t "$PANE_TARGET" "/clear" 2>/dev/null
+                sleep 0.3
+                timeout 5 tmux send-keys -t "$PANE_TARGET" Enter 2>/dev/null
+                # Wait for confirmation prompt
+                sleep 0.5
+                # Send 'y' to confirm
+                timeout 5 tmux send-keys -t "$PANE_TARGET" "y" 2>/dev/null
+                sleep 0.3
+                timeout 5 tmux send-keys -t "$PANE_TARGET" Enter 2>/dev/null
+                sleep 3
+                return 0
+            fi
+            if [[ "$cmd" == /model* ]]; then
+                echo "[$(date)] Skipping $cmd (not supported on kiro)" >&2
+                return 0
+            fi
+            ;;
         codex)
             # Codex: /clear不存在→/newで新規会話開始, /model非対応→スキップ
             # /clearはCodexでは未定義コマンドでCLI終了してしまうため、/newに変換

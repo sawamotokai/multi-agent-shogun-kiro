@@ -15,7 +15,7 @@ CLI_ADAPTER_PROJECT_ROOT="$(cd "${CLI_ADAPTER_DIR}/.." && pwd)"
 CLI_ADAPTER_SETTINGS="${CLI_ADAPTER_SETTINGS:-${CLI_ADAPTER_PROJECT_ROOT}/config/settings.yaml}"
 
 # 許可されたCLI種別
-CLI_ADAPTER_ALLOWED_CLIS="claude codex copilot kimi"
+CLI_ADAPTER_ALLOWED_CLIS="claude codex copilot kimi kiro"
 
 # --- 内部ヘルパー ---
 
@@ -67,11 +67,11 @@ _cli_adapter_is_valid_cli() {
 
 # get_cli_type(agent_id)
 # 指定エージェントが使用すべきCLI種別を返す
-# フォールバック: cli.agents.{id}.type → cli.agents.{id}(文字列) → cli.default → "claude"
+# フォールバック: cli.agents.{id}.type → cli.agents.{id}(文字列) → cli.default → "kiro"
 get_cli_type() {
     local agent_id="$1"
     if [[ -z "$agent_id" ]]; then
-        echo "claude"
+        echo "kiro"
         return 0
     fi
 
@@ -83,36 +83,36 @@ try:
         cfg = yaml.safe_load(f) or {}
     cli = cfg.get('cli', {})
     if not isinstance(cli, dict):
-        print('claude'); sys.exit(0)
+        print('kiro'); sys.exit(0)
     agents = cli.get('agents', {})
     if not isinstance(agents, dict):
-        print(cli.get('default', 'claude') if cli.get('default', 'claude') in ('claude','codex','copilot','kimi') else 'claude')
+        print(cli.get('default', 'kiro') if cli.get('default', 'kiro') in ('claude','codex','copilot','kimi','kiro') else 'kiro')
         sys.exit(0)
     agent_cfg = agents.get('${agent_id}')
     if isinstance(agent_cfg, dict):
         t = agent_cfg.get('type', '')
-        if t in ('claude', 'codex', 'copilot', 'kimi'):
+        if t in ('claude', 'codex', 'copilot', 'kimi', 'kiro'):
             print(t); sys.exit(0)
     elif isinstance(agent_cfg, str):
-        if agent_cfg in ('claude', 'codex', 'copilot', 'kimi'):
+        if agent_cfg in ('claude', 'codex', 'copilot', 'kimi', 'kiro'):
             print(agent_cfg); sys.exit(0)
-    default = cli.get('default', 'claude')
-    if default in ('claude', 'codex', 'copilot', 'kimi'):
+    default = cli.get('default', 'kiro')
+    if default in ('claude', 'codex', 'copilot', 'kimi', 'kiro'):
         print(default)
     else:
-        print('claude', file=sys.stderr)
-        print('claude')
+        print('kiro', file=sys.stderr)
+        print('kiro')
 except Exception as e:
-    print('claude', file=sys.stderr)
-    print('claude')
+    print('kiro', file=sys.stderr)
+    print('kiro')
 " 2>/dev/null)
 
     if [[ -z "$result" ]]; then
-        echo "claude"
+        echo "kiro"
     else
         if ! _cli_adapter_is_valid_cli "$result"; then
-            echo "[WARN] Invalid CLI type '$result' for agent '$agent_id'. Falling back to 'claude'." >&2
-            echo "claude"
+            echo "[WARN] Invalid CLI type '$result' for agent '$agent_id'. Falling back to 'kiro'." >&2
+            echo "kiro"
         else
             echo "$result"
         fi
@@ -150,6 +150,13 @@ build_cli_command() {
             fi
             echo "$cmd"
             ;;
+        kiro)
+            local cmd="kiro-cli chat"
+            if [[ -n "$model" ]]; then
+                cmd="$cmd --model $model"
+            fi
+            echo "$cmd"
+            ;;
         *)
             echo "claude --dangerously-skip-permissions"
             ;;
@@ -178,6 +185,7 @@ get_instruction_file() {
         codex)   echo "instructions/codex-${role}.md" ;;
         copilot) echo ".github/copilot-instructions-${role}.md" ;;
         kimi)    echo "instructions/generated/kimi-${role}.md" ;;
+        kiro)    echo "instructions/generated/kiro-${role}.md" ;;
         *)       echo "instructions/${role}.md" ;;
     esac
 }
@@ -211,6 +219,12 @@ validate_cli_availability() {
                 echo "[ERROR] Kimi CLI not found. Install from https://platform.moonshot.cn/" >&2
                 return 1
             fi
+            ;;
+        kiro)
+            command -v kiro-cli &>/dev/null || {
+                echo "[ERROR] Kiro CLI not found. Install from https://kiro.dev" >&2
+                return 1
+            }
             ;;
         *)
             echo "[ERROR] Unknown CLI type: '$cli_type'. Allowed: $CLI_ADAPTER_ALLOWED_CLIS" >&2
@@ -255,6 +269,10 @@ get_agent_model() {
                 ashigaru*)      echo "k2.5" ;;
                 *)              echo "k2.5" ;;
             esac
+            ;;
+        kiro)
+            # Kiro CLI用デフォルトモデル
+            echo "claude-opus-4.6"
             ;;
         *)
             # Claude Code/Codex/Copilot用デフォルトモデル（kessen/heiji互換）
