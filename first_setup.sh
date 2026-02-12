@@ -771,6 +771,101 @@ else
 fi
 
 # ============================================================
+# STEP 12: Kiro Agent Setup (Global: ~/.kiro/agents/)
+# ============================================================
+# Source the agent generator functions
+source "$SCRIPT_DIR/scripts/generate_kiro_agents.sh"
+
+log_step "STEP 12: Kiro エージェント設定"
+
+KIRO_AGENTS_DIR="$HOME/.kiro/agents"
+KIRO_RESOURCES_DIR="$HOME/.kiro/resources"
+mkdir -p "$KIRO_AGENTS_DIR"
+mkdir -p "$KIRO_RESOURCES_DIR"
+
+# --- Generate system.md resource files ---
+log_info "system.md リソースファイルを生成中..."
+
+generate_shogun_system_md "$KIRO_RESOURCES_DIR/shogun-system.md" "$SCRIPT_DIR"
+log_success "shogun-system.md 生成完了"
+
+generate_karo_system_md "$KIRO_RESOURCES_DIR/karo-system.md" "$SCRIPT_DIR"
+log_success "karo-system.md 生成完了"
+
+generate_ashigaru_system_md "$KIRO_RESOURCES_DIR/ashigaru-system.md" "$SCRIPT_DIR"
+log_success "ashigaru-system.md 生成完了"
+
+# --- Generate agent JSON configs via Python (proper JSON escaping) ---
+log_info "エージェントJSON設定を生成中..."
+python3 << PYEOF
+import json, os
+
+script_dir = "${SCRIPT_DIR}"
+resources_dir = "${KIRO_RESOURCES_DIR}"
+agents_dir = "${KIRO_AGENTS_DIR}"
+
+agents = {
+    "shogun": {
+        "name": "shogun",
+        "description": "将軍 - Strategic commander who delegates to Karo",
+        "prompt": "You are Shogun (将軍), the strategic commander of the multi-agent-shogun system. You NEVER execute tasks yourself. You delegate ALL work to Karo via YAML commands written to queue/shogun_to_karo.yaml and notified via: bash scripts/inbox_write.sh karo '<message>' cmd_new shogun. After delegating, END YOUR TURN immediately so the Lord can input the next command. Read your full instructions from the resource file shogun-system.md. On startup: 1) identify yourself via tmux display-message -t \"\\\$TMUX_PANE\" -p '#{@agent_id}', 2) read queue/shogun_to_karo.yaml for current state, 3) read dashboard.md for situation awareness. Speak in sengoku (feudal Japan) style based on config/settings.yaml language setting.",
+        "tools": ["@builtin"],
+        "allowedTools": ["@builtin", "fs_read", "fs_write", "execute_bash"],
+        "resources": [
+            f"file://{resources_dir}/shogun-system.md",
+            f"file://{script_dir}/KIRO.md",
+            f"file://{script_dir}/AGENTS.md"
+        ],
+        "useLegacyMcpJson": False
+    },
+    "karo": {
+        "name": "karo",
+        "description": "家老 - Task manager who assigns work to Ashigaru",
+        "prompt": "You are Karo (家老), the task manager of the multi-agent-shogun system. You NEVER execute tasks yourself. You receive commands from Shogun via queue/shogun_to_karo.yaml, decompose them into subtasks, write task YAML to queue/tasks/ashigaru{N}.yaml, and dispatch ashigaru via: bash scripts/inbox_write.sh ashigaru{N} '<message>' task_assigned karo. You are the SOLE updater of dashboard.md. After dispatching all tasks, STOP and wait for inbox wakeup (event-driven, NO polling). Read your full instructions from the resource file karo-system.md. On startup: 1) identify yourself via tmux display-message -t \"\\\$TMUX_PANE\" -p '#{@agent_id}', 2) scan queue/shogun_to_karo.yaml for pending commands, 3) scan queue/reports/ for unprocessed reports. Speak in sengoku style.",
+        "tools": ["@builtin"],
+        "allowedTools": ["@builtin", "fs_read", "fs_write", "execute_bash"],
+        "resources": [
+            f"file://{resources_dir}/karo-system.md",
+            f"file://{script_dir}/KIRO.md",
+            f"file://{script_dir}/AGENTS.md"
+        ],
+        "useLegacyMcpJson": False
+    },
+    "ashigaru": {
+        "name": "ashigaru",
+        "description": "足軽 - Task executor who reports to Karo",
+        "prompt": "You are Ashigaru (足軽), a task executor in the multi-agent-shogun system. First identify yourself: tmux display-message -t \"\\\$TMUX_PANE\" -p '#{@agent_id}' — this returns your ID (e.g. ashigaru3). Read ONLY your own task file queue/tasks/ashigaru{YOUR_NUMBER}.yaml and write ONLY to queue/reports/ashigaru{YOUR_NUMBER}_report.yaml. Execute the assigned task, write a report, then notify Karo: bash scripts/inbox_write.sh karo '足軽{N}号、任務完了でござる。' report_received ashigaru{N}. NEVER contact the Lord or Shogun directly. Read your full instructions from the resource file ashigaru-system.md. Speak in sengoku style for spoken output only (not in code/YAML).",
+        "tools": ["@builtin"],
+        "allowedTools": ["@builtin", "fs_read", "fs_write", "execute_bash"],
+        "resources": [
+            f"file://{resources_dir}/ashigaru-system.md",
+            f"file://{script_dir}/KIRO.md",
+            f"file://{script_dir}/AGENTS.md"
+        ],
+        "useLegacyMcpJson": False
+    }
+}
+
+for name, config in agents.items():
+    path = f"{agents_dir}/{name}.json"
+    with open(path, 'w') as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+    print(f"  Generated {name}.json")
+
+PYEOF
+log_success "全エージェントJSON生成完了"
+
+# Clean up old directory-based agent configs if they exist
+for old_dir in shogun karo ashigaru; do
+    if [ -d "$KIRO_AGENTS_DIR/$old_dir" ]; then
+        rm -rf "$KIRO_AGENTS_DIR/$old_dir"
+        log_info "旧形式ディレクトリ削除: ~/.kiro/agents/$old_dir/"
+    fi
+done
+
+RESULTS+=("Kiro エージェント設定: OK")
+
+# ============================================================
 # 結果サマリー
 # ============================================================
 echo ""

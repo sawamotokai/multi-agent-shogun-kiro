@@ -1191,7 +1191,8 @@ Priority: Token > Basic > None. If neither is set, no auth headers are sent (bac
 │      ├── Check/install Node.js v20+ (via nvm)                      │
 │      ├── Check/install Claude Code CLI (native version)             │
 │      │       ※ Proposes migration if npm version detected           │
-│      └── Configure Memory MCP server                                │
+│      ├── Configure Memory MCP server                                │
+│      └── Generate Kiro agent configs (~/.kiro/agents/)              │
 │                                                                     │
 ├─────────────────────────────────────────────────────────────────────┤
 │                    Daily Startup (run every day)                     │

@@ -152,9 +152,20 @@ build_cli_command() {
             ;;
         kiro)
             local cmd="kiro-cli chat"
+            # Map agent_id to Kiro agent profile name
+            local kiro_agent=""
+            case "$agent_id" in
+                shogun)    kiro_agent="shogun" ;;
+                karo)      kiro_agent="karo" ;;
+                ashigaru*) kiro_agent="ashigaru" ;;
+            esac
+            if [[ -n "$kiro_agent" ]]; then
+                cmd="$cmd --agent $kiro_agent"
+            fi
             if [[ -n "$model" ]]; then
                 cmd="$cmd --model $model"
             fi
+            cmd="$cmd -a"
             echo "$cmd"
             ;;
         *)
