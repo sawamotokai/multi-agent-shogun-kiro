@@ -466,6 +466,30 @@ if [ "$PROJECT_ROOT" != "$SCRIPT_DIR" ] && [ ! -e "$PROJECT_ROOT/dashboard.md" ]
     ln -sf "$SCRIPT_DIR/dashboard.md" "$PROJECT_ROOT/dashboard.md"
     log_info "📊 dashboard.md → プロジェクトルートにシンボリックリンク作成"
 fi
+
+# Symlink project-specific skills to PROJECT_ROOT/.kiro/skills/ (workspace scope)
+if [ "$PROJECT_ROOT" != "$SCRIPT_DIR" ] && [ -d "$SCRIPT_DIR/skills" ]; then
+    WS_SKILLS_DIR="$PROJECT_ROOT/.kiro/skills"
+    mkdir -p "$WS_SKILLS_DIR"
+    WS_SKILLS_LINKED=0
+    GLOBAL_SKILLS="skill-creator"  # These go to ~/.kiro/skills/ only (via first_setup.sh)
+    for skill_dir in "$SCRIPT_DIR/skills"/*/; do
+        [ -d "$skill_dir" ] || continue
+        skill_name=$(basename "$skill_dir")
+        # Skip global-only skills
+        case " $GLOBAL_SKILLS " in
+            *" $skill_name "*) continue ;;
+        esac
+        skill_file="$skill_dir/SKILL.md"
+        if [ -f "$skill_file" ] && [ ! -e "$WS_SKILLS_DIR/${skill_name}.md" ]; then
+            ln -sf "$skill_file" "$WS_SKILLS_DIR/${skill_name}.md"
+            WS_SKILLS_LINKED=$((WS_SKILLS_LINKED + 1))
+        fi
+    done
+    if [ $WS_SKILLS_LINKED -gt 0 ]; then
+        log_info "🎯 $WS_SKILLS_LINKED 個のスキルを $PROJECT_ROOT/.kiro/skills/ にリンク"
+    fi
+fi
 echo ""
 
 # ═══════════════════════════════════════════════════════════════════════════════

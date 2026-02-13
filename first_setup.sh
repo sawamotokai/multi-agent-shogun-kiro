@@ -865,6 +865,33 @@ done
 
 RESULTS+=("Kiro エージェント設定: OK")
 
+# --- Symlink global skills to ~/.kiro/skills/ ---
+# Only system-wide skills (e.g. skill-creator) go here.
+# Project-specific skills are symlinked to PROJECT_ROOT/.kiro/skills/ by shutsujin_departure.sh.
+KIRO_SKILLS_DIR="$HOME/.kiro/skills"
+mkdir -p "$KIRO_SKILLS_DIR"
+SKILLS_LINKED=0
+GLOBAL_SKILLS="skill-creator"  # Space-separated list of global skill names
+if [ -d "$SCRIPT_DIR/skills" ]; then
+    for global_skill in $GLOBAL_SKILLS; do
+        skill_file="$SCRIPT_DIR/skills/$global_skill/SKILL.md"
+        if [ -f "$skill_file" ]; then
+            target="$KIRO_SKILLS_DIR/${global_skill}.md"
+            if [ ! -e "$target" ]; then
+                ln -sf "$skill_file" "$target"
+                SKILLS_LINKED=$((SKILLS_LINKED + 1))
+            fi
+        fi
+    done
+    if [ $SKILLS_LINKED -gt 0 ]; then
+        log_success "$SKILLS_LINKED 個のグローバルスキルを ~/.kiro/skills/ にリンクしました"
+    else
+        log_info "グローバルスキルは既にリンク済みです"
+    fi
+fi
+
+RESULTS+=("Kiro スキル: OK")
+
 # ============================================================
 # 結果サマリー
 # ============================================================
