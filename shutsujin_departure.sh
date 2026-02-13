@@ -336,12 +336,17 @@ fi
 [ -d ./queue/reports ] || mkdir -p ./queue/reports
 [ -d ./queue/tasks ] || mkdir -p ./queue/tasks
 # inbox はLinux FSにシンボリックリンク（WSL2の/mnt/c/ではinotifywaitが動かないため）
-INBOX_LINUX_DIR="$HOME/.local/share/multi-agent-shogun/inbox"
-if [ ! -L ./queue/inbox ]; then
-    mkdir -p "$INBOX_LINUX_DIR"
-    [ -d ./queue/inbox ] && cp ./queue/inbox/*.yaml "$INBOX_LINUX_DIR/" 2>/dev/null && rm -rf ./queue/inbox
-    ln -sf "$INBOX_LINUX_DIR" ./queue/inbox
-    log_info "  └─ inbox → Linux FS ($INBOX_LINUX_DIR) にシンボリックリンク作成"
+# macOSではfswatch使用のためシンボリックリンク不要
+if [ "$(uname -s)" != "Darwin" ]; then
+    INBOX_LINUX_DIR="$HOME/.local/share/multi-agent-shogun/inbox"
+    if [ ! -L ./queue/inbox ]; then
+        mkdir -p "$INBOX_LINUX_DIR"
+        [ -d ./queue/inbox ] && cp ./queue/inbox/*.yaml "$INBOX_LINUX_DIR/" 2>/dev/null && rm -rf ./queue/inbox
+        ln -sf "$INBOX_LINUX_DIR" ./queue/inbox
+        log_info "  └─ inbox → Linux FS ($INBOX_LINUX_DIR) にシンボリックリンク作成"
+    fi
+else
+    [ -d ./queue/inbox ] || mkdir -p ./queue/inbox
 fi
 
 if [ "$CLEAN_MODE" = true ]; then

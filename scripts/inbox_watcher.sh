@@ -48,17 +48,45 @@ if [ "${__INBOX_WATCHER_TESTING__:-}" != "1" ]; then
 
     echo "[$(date)] inbox_watcher started — agent: $AGENT_ID, pane: $PANE_TARGET, cli: $CLI_TYPE" >&2
 
-    # Ensure file watcher is available (inotifywait on Linux, fswatch on macOS)
-    if command -v inotifywait &>/dev/null; then
-        FILE_WATCHER="inotifywait"
-    elif command -v fswatch &>/dev/null; then
-        FILE_WATCHER="fswatch"
+    # Detect OS and select file-watching backend
+    INBOX_WATCHER_OS="$(uname -s)"
+    if [ "$INBOX_WATCHER_OS" = "Darwin" ]; then
+        # macOS: use fswatch instead of inotifywait
+        if ! command -v fswatch &>/dev/null; then
+            echo "[inbox_watcher] ERROR: fswatch not found. Install: brew install fswatch" >&2
+            exit 1
+        fi
+        WATCH_BACKEND="fswatch"
     else
-        echo "[inbox_watcher] ERROR: Neither inotifywait nor fswatch found." >&2
-        echo "[inbox_watcher] Install: Linux: sudo apt install inotify-tools / macOS: brew install fswatch" >&2
-        exit 1
+        # Linux: use inotifywait
+        if ! command -v inotifywait &>/dev/null; then
+            echo "[inbox_watcher] ERROR: inotifywait not found. Install: sudo apt install inotify-tools" >&2
+            exit 1
+        fi
+        WATCH_BACKEND="inotifywait"
     fi
-    echo "[$(date)] Using file watcher: $FILE_WATCHER" >&2
+    echo "[$(date)] File watch backend: $WATCH_BACKEND" >&2
+fi
+
+# ─── timeout command compatibility wrapper (macOS support) ───
+if ! command -v timeout &>/dev/null; then
+  if command -v gtimeout &>/dev/null; then
+    timeout() { gtimeout "$@"; }
+  else
+    # Pure bash fallback: timeout DURATION COMMAND [ARGS...]
+    timeout() {
+      local duration="$1"; shift
+      "$@" &
+      local pid=$!
+      ( sleep "$duration" && kill "$pid" 2>/dev/null ) &
+      local watcher=$!
+      wait "$pid" 2>/dev/null
+      local rc=$?
+      kill "$watcher" 2>/dev/null
+      wait "$watcher" 2>/dev/null
+      return $rc
+    }
+  fi
 fi
 
 # ─── Escalation state ───
@@ -76,6 +104,11 @@ LAST_NUDGE_COUNT=${LAST_NUDGE_COUNT:-""}
 NUDGE_COOLDOWN_SEC=${NUDGE_COOLDOWN_SEC:-60}
 # Codex は「思考中に入力が入ると即拾う」挙動があり、思考がループすることがあるため長めにする。
 NUDGE_COOLDOWN_SEC_CODEX=${NUDGE_COOLDOWN_SEC_CODEX:-300}
+
+# ─── Context reset tracking ───
+# Tracks whether we've sent /new or /clear for the current task_assigned batch.
+# Resets to 0 when all messages are read (FIRST_UNREAD_SEEN → 0).
+NEW_CONTEXT_SENT=${NEW_CONTEXT_SENT:-0}
 
 # ─── Phase feature flags (cmd_107 Phase 1/2/3) ───
 # ASW_PHASE:
@@ -117,7 +150,7 @@ update_metrics() {
     mkdir -p "$(dirname "$METRICS_FILE")" 2>/dev/null || true
     cat > "$METRICS_FILE" <<EOF
 agent_id: "${AGENT_ID:-unknown}"
-timestamp: "$(date -Iseconds)"
+timestamp: "$(date '+%Y-%m-%dT%H:%M:%S%z')"
 unread_latency_sec: $unread_latency_sec
 read_count: $READ_COUNT
 bytes_read: $READ_BYTES_TOTAL
@@ -157,7 +190,7 @@ should_throttle_nudge() {
 
 is_valid_cli_type() {
     case "${1:-}" in
-        claude|codex|copilot|kimi|kiro) return 0 ;;
+        claude|codex|copilot|kimi) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -209,9 +242,9 @@ normalize_special_command() {
 }
 
 enqueue_recovery_task_assigned() {
-    local lockdir="${LOCKFILE}.d"
-    mkdir "$lockdir" 2>/dev/null || true
-    INBOX_PATH="$INBOX" AGENT_ID="$AGENT_ID" python3 - << 'PY'
+    (
+        flock -x 200
+        INBOX_PATH="$INBOX" AGENT_ID="$AGENT_ID" "python3" - << 'PY'
 import datetime
 import os
 import uuid
@@ -267,7 +300,7 @@ except Exception:
     # Best-effort safety net only. Primary /clear delivery must not fail here.
     print("ERROR")
 PY
-    rmdir "$lockdir" 2>/dev/null || true
+    ) 200>"$LOCKFILE" 2>/dev/null
 }
 
 no_idle_full_read() {
@@ -280,7 +313,7 @@ no_idle_full_read() {
 
 # summary-first: unread_count fast-path before full read
 get_unread_count_fast() {
-    INBOX_PATH="$INBOX" python3 - << 'PY'
+    INBOX_PATH="$INBOX" "python3" - << 'PY'
 import json
 import os
 import yaml
@@ -301,10 +334,9 @@ PY
 # Returns JSON lines: {"count": N, "has_special": true/false, "specials": [...]}
 # Test anchor for bats awk pattern: get_unread_info\\(\\)
 get_unread_info() {
-    local lockdir="${LOCKFILE}.d"
-    local got_lock=0
-    if mkdir "$lockdir" 2>/dev/null; then got_lock=1; fi
-    INBOX_PATH="$INBOX" python3 - << 'PY'
+    (
+        flock -x 200
+        INBOX_PATH="$INBOX" "python3" - << 'PY'
 import json
 import os
 import yaml
@@ -336,15 +368,18 @@ try:
         os.replace(tmp_path, inbox)
 
     normal_count = len(unread) - len(specials)
+    normal_msgs = [m for m in unread if m.get("type") not in special_types]
+    has_task_assigned = any(m.get("type") == "task_assigned" for m in normal_msgs)
     payload = {
         "count": normal_count,
+        "has_task_assigned": has_task_assigned,
         "specials": [{"type": m.get("type", ""), "content": m.get("content", "")} for m in specials],
     }
     print(json.dumps(payload))
 except Exception:
     print(json.dumps({"count": 0, "specials": []}))
 PY
-    [ "$got_lock" -eq 1 ] && rmdir "$lockdir" 2>/dev/null
+    ) 200>"$LOCKFILE" 2>/dev/null
 }
 
 # ─── Send CLI command via pty direct write ───
@@ -367,35 +402,19 @@ send_cli_command() {
     # CLI別コマンド変換
     local actual_cmd="$cmd"
     case "$effective_cli" in
-        kiro)
-            # Kiro: /clear requires y/n confirmation prompt
-            if [[ "$cmd" == "/clear" ]]; then
-                echo "[$(date)] [SEND-KEYS] Kiro /clear: sending /clear + y confirmation for $AGENT_ID" >&2
-                timeout 5 tmux send-keys -t "$PANE_TARGET" "/clear" 2>/dev/null
-                sleep 0.3
-                timeout 5 tmux send-keys -t "$PANE_TARGET" Enter 2>/dev/null
-                # Wait for confirmation prompt
-                sleep 0.5
-                # Send 'y' to confirm
-                timeout 5 tmux send-keys -t "$PANE_TARGET" "y" 2>/dev/null
-                sleep 0.3
-                timeout 5 tmux send-keys -t "$PANE_TARGET" Enter 2>/dev/null
-                sleep 3
-                return 0
-            fi
-            if [[ "$cmd" == /model* ]]; then
-                echo "[$(date)] Skipping $cmd (not supported on kiro)" >&2
-                return 0
-            fi
-            ;;
         codex)
             # Codex: /clear不存在→/newで新規会話開始, /model非対応→スキップ
             # /clearはCodexでは未定義コマンドでCLI終了してしまうため、/newに変換
             if [[ "$cmd" == "/clear" ]]; then
                 echo "[$(date)] [SEND-KEYS] Codex /clear→/new: starting new conversation for $AGENT_ID" >&2
-                timeout 5 tmux send-keys -t "$PANE_TARGET" "/new" 2>/dev/null
+                # Dismiss suggestion UI first (typing "x" clears autocomplete prompt)
+                timeout 5 tmux send-keys -t "$PANE_TARGET" "x" 2>/dev/null || true
                 sleep 0.3
-                timeout 5 tmux send-keys -t "$PANE_TARGET" Enter 2>/dev/null
+                timeout 5 tmux send-keys -t "$PANE_TARGET" C-u 2>/dev/null || true
+                sleep 0.3
+                timeout 5 tmux send-keys -t "$PANE_TARGET" "/new" 2>/dev/null || true
+                sleep 0.3
+                timeout 5 tmux send-keys -t "$PANE_TARGET" Enter 2>/dev/null || true
                 sleep 3
                 return 0
             fi
@@ -408,11 +427,11 @@ send_cli_command() {
             # Copilot: /clearはCtrl-C+再起動, /model非対応→スキップ
             if [[ "$cmd" == "/clear" ]]; then
                 echo "[$(date)] [SEND-KEYS] Copilot /clear: sending Ctrl-C + restart for $AGENT_ID" >&2
-                timeout 5 tmux send-keys -t "$PANE_TARGET" C-c 2>/dev/null
+                timeout 5 tmux send-keys -t "$PANE_TARGET" C-c 2>/dev/null || true
                 sleep 2
-                timeout 5 tmux send-keys -t "$PANE_TARGET" "copilot --yolo" 2>/dev/null
+                timeout 5 tmux send-keys -t "$PANE_TARGET" "copilot --yolo" 2>/dev/null || true
                 sleep 0.3
-                timeout 5 tmux send-keys -t "$PANE_TARGET" Enter 2>/dev/null
+                timeout 5 tmux send-keys -t "$PANE_TARGET" Enter 2>/dev/null || true
                 sleep 3
                 return 0
             fi
@@ -428,12 +447,12 @@ send_cli_command() {
     # Clear stale input first, then send command (text and Enter separated for Codex TUI)
     # Codex CLI: C-c when idle causes CLI to exit — skip it
     if [[ "$effective_cli" != "codex" ]]; then
-        timeout 5 tmux send-keys -t "$PANE_TARGET" C-c 2>/dev/null
+        timeout 5 tmux send-keys -t "$PANE_TARGET" C-c 2>/dev/null || true
         sleep 0.5
     fi
-    timeout 5 tmux send-keys -t "$PANE_TARGET" "$actual_cmd" 2>/dev/null
+    timeout 5 tmux send-keys -t "$PANE_TARGET" "$actual_cmd" 2>/dev/null || true
     sleep 0.3
-    timeout 5 tmux send-keys -t "$PANE_TARGET" Enter 2>/dev/null
+    timeout 5 tmux send-keys -t "$PANE_TARGET" Enter 2>/dev/null || true
 
     # /clear needs extra wait time before follow-up
     if [[ "$actual_cmd" == "/clear" ]]; then
@@ -443,11 +462,83 @@ send_cli_command() {
     fi
 }
 
+# ─── Send context reset before new task ───
+# Called when task_assigned is detected in unread messages.
+# Sends the appropriate "new conversation" command per CLI type to clear
+# stale context from the previous task.
+# CLI mapping: claude→/clear, codex→/new, copilot→/clear, kimi→/clear
+send_context_reset() {
+    local effective_cli
+    effective_cli=$(get_effective_cli_type)
+
+    # Safety: never inject CLI commands into the shogun pane.
+    if [ "$AGENT_ID" = "shogun" ]; then
+        echo "[$(date)] [SKIP] shogun: suppressing context reset" >&2
+        return 0
+    fi
+
+    local reset_cmd
+    case "$effective_cli" in
+        codex)    reset_cmd="/new" ;;
+        claude)   reset_cmd="/clear" ;;
+        copilot)  reset_cmd="/clear" ;;
+        kimi)     reset_cmd="/clear" ;;
+        *)        reset_cmd="/new" ;;  # safe default (codex-safe)
+    esac
+
+    echo "[$(date)] [CONTEXT-RESET] Sending $reset_cmd before task_assigned for $AGENT_ID ($effective_cli)" >&2
+
+    # Dismiss Codex suggestion UI before sending reset command
+    if [[ "$effective_cli" == "codex" ]]; then
+        timeout 5 tmux send-keys -t "$PANE_TARGET" "x" 2>/dev/null || true
+        sleep 0.3
+        timeout 5 tmux send-keys -t "$PANE_TARGET" C-u 2>/dev/null || true
+        sleep 0.3
+    fi
+
+    # Send the command (text and Enter separated for TUI compatibility)
+    timeout 5 tmux send-keys -t "$PANE_TARGET" "$reset_cmd" 2>/dev/null || true
+    sleep 0.3
+    timeout 5 tmux send-keys -t "$PANE_TARGET" Enter 2>/dev/null || true
+
+    # Poll until agent becomes idle (prompt ready) instead of fixed sleep.
+    # Max 15s (3 attempts × 5s). If still busy after 15s, proceed anyway.
+    local attempt
+    for attempt in 1 2 3; do
+        sleep 5
+        if ! agent_is_busy; then
+            echo "[$(date)] [CONTEXT-RESET] $AGENT_ID idle after ${attempt}×5s — ready for nudge" >&2
+            return 0
+        fi
+        echo "[$(date)] [CONTEXT-RESET] $AGENT_ID still busy after ${attempt}×5s — retrying" >&2
+    done
+    echo "[$(date)] [CONTEXT-RESET] $AGENT_ID still busy after 15s — proceeding with nudge anyway" >&2
+}
+
 # ─── Agent self-watch detection ───
 # Check if the agent has an active inotifywait on its inbox.
 # If yes, the agent will self-wake — no nudge needed.
 agent_has_self_watch() {
-    pgrep -f "inotifywait.*inbox/${AGENT_ID}.yaml" >/dev/null 2>&1
+    # Codex/Copilot/Kimi CLIs cannot run self-watch. Only Claude Code agents can.
+    local effective_cli
+    effective_cli=$(get_effective_cli_type)
+    if [[ "$effective_cli" != "claude" ]]; then
+        return 1  # non-Claude CLIs never have self-watch
+    fi
+    # For Claude Code agents: check if an inotifywait exists that is NOT
+    # a child of this inbox_watcher process (exclude our own watcher).
+    local my_pgid
+    my_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
+    local found=1  # default: not found
+    while IFS= read -r pid; do
+        local pid_pgid
+        pid_pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
+        if [[ "$pid_pgid" != "$my_pgid" ]]; then
+            found=0  # found an inotifywait NOT from our process group
+            break
+        fi
+    done < <(pgrep -f "inotifywait.*inbox/${AGENT_ID}.yaml" 2>/dev/null)
+    return $found
 }
 
 # ─── Agent busy detection ───
@@ -529,15 +620,28 @@ send_wakeup() {
 
     # 優先度3: tmux send-keys（テキストとEnterを分離 — Codex TUI対策）
     echo "[$(date)] [SEND-KEYS] Sending nudge to $PANE_TARGET for $AGENT_ID" >&2
+
+    # Codex suggestion UI dismissal: typing any character dismisses the autocomplete
+    # suggestion prompt (› Implement {feature} etc.) that traps idle agents.
+    # Sequence: "x" (dismiss suggestion) → C-u (clear input) → nudge → Enter
+    local effective_cli_for_nudge
+    effective_cli_for_nudge=$(get_effective_cli_type)
+    if [[ "$effective_cli_for_nudge" == "codex" ]]; then
+        timeout 5 tmux send-keys -t "$PANE_TARGET" "x" 2>/dev/null || true
+        sleep 0.3
+        timeout 5 tmux send-keys -t "$PANE_TARGET" C-u 2>/dev/null || true
+        sleep 0.3
+    fi
+
     if timeout 5 tmux send-keys -t "$PANE_TARGET" "$nudge" 2>/dev/null; then
         sleep 0.3
-        timeout 5 tmux send-keys -t "$PANE_TARGET" Enter 2>/dev/null
+        timeout 5 tmux send-keys -t "$PANE_TARGET" Enter 2>/dev/null || true
         echo "[$(date)] Wake-up sent to $AGENT_ID (${unread_count} unread)" >&2
         return 0
     fi
 
     echo "[$(date)] WARNING: send-keys failed or timed out for $AGENT_ID" >&2
-    return 1
+    return 0  # Never return 1 — set -euo pipefail would kill the watcher daemon
 }
 
 # ─── Send wake-up nudge with Escape prefix ───
@@ -582,23 +686,23 @@ send_wakeup_with_escape() {
 
     echo "[$(date)] [SEND-KEYS] ESCALATION Phase 2: Escape×2 + nudge for $AGENT_ID (cli=$effective_cli)" >&2
     # Escape×2 to exit any mode
-    timeout 5 tmux send-keys -t "$PANE_TARGET" Escape Escape 2>/dev/null
+    timeout 5 tmux send-keys -t "$PANE_TARGET" Escape Escape 2>/dev/null || true
     sleep 0.5
     # C-c to clear stale input (but Codex CLI terminates on C-c when idle, so skip it)
     if [[ "$effective_cli" != "codex" ]]; then
-        timeout 5 tmux send-keys -t "$PANE_TARGET" C-c 2>/dev/null
+        timeout 5 tmux send-keys -t "$PANE_TARGET" C-c 2>/dev/null || true
         sleep 0.5
         c_ctrl_state="sent"
     fi
     if timeout 5 tmux send-keys -t "$PANE_TARGET" "$nudge" 2>/dev/null; then
         sleep 0.3
-        timeout 5 tmux send-keys -t "$PANE_TARGET" Enter 2>/dev/null
+        timeout 5 tmux send-keys -t "$PANE_TARGET" Enter 2>/dev/null || true
         echo "[$(date)] Escape+nudge sent to $AGENT_ID (${unread_count} unread, cli=$effective_cli, C-c=$c_ctrl_state)" >&2
         return 0
     fi
 
     echo "[$(date)] WARNING: send-keys failed for Escape+nudge ($AGENT_ID)" >&2
-    return 1
+    return 0  # Never return 1 — set -euo pipefail would kill the watcher daemon
 }
 
 # ─── Process cycle ───
@@ -610,7 +714,7 @@ process_unread() {
     local fast_info
     fast_info=$(get_unread_count_fast)
     local fast_count
-    fast_count=$(echo "$fast_info" | python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null)
+    fast_count=$(echo "$fast_info" | "python3" -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null)
 
     if no_idle_full_read "$trigger" && [ "$fast_count" -eq 0 ] 2>/dev/null; then
         # no_idle_full_read guard: unread=0 and timeout path → no full inbox read
@@ -618,10 +722,11 @@ process_unread() {
             echo "[$(date)] All messages read for $AGENT_ID — escalation reset (fast-path)" >&2
         fi
         FIRST_UNREAD_SEEN=0
+        NEW_CONTEXT_SENT=0
         if ! agent_is_busy; then
             # Shogun is human-controlled; never clear the input line automatically.
             if [ "$AGENT_ID" != "shogun" ]; then
-                timeout 2 tmux send-keys -t "$PANE_TARGET" C-u 2>/dev/null
+                timeout 2 tmux send-keys -t "$PANE_TARGET" C-u 2>/dev/null || true
             fi
         fi
         return 0
@@ -638,7 +743,7 @@ process_unread() {
 
     # Handle special CLI commands first (/clear, /model)
     local specials
-    specials=$(echo "$info" | python3 -c "
+    specials=$(echo "$info" | "python3" -c "
 import sys, json
 data = json.load(sys.stdin)
 for s in data.get('specials', []):
@@ -673,7 +778,11 @@ for s in data.get('specials', []):
 
     # Send wake-up nudge for normal messages (with escalation)
     local normal_count
-    normal_count=$(echo "$info" | python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null)
+    normal_count=$(echo "$info" | "python3" -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null)
+
+    # Check if unread messages include task_assigned (for context reset)
+    local has_task_assigned
+    has_task_assigned=$(echo "$info" | "python3" -c "import sys,json; print(1 if json.load(sys.stdin).get('has_task_assigned') else 0)" 2>/dev/null)
 
     if [ "$normal_count" -gt 0 ] 2>/dev/null; then
         local now
@@ -686,6 +795,16 @@ for s in data.get('specials', []):
             FIRST_UNREAD_SEEN=$now
             echo "[$(date)] $normal_count unread for $AGENT_ID but agent is busy — pausing escalation timer" >&2
             return 0
+        fi
+
+        # ─── Context reset before new task ───
+        # Send /new or /clear once when task_assigned is first detected,
+        # to clear stale context from the previous task.
+        # Skip if: (1) already sent this batch, (2) clear_command already handled above,
+        #          (3) agent is shogun (human-controlled).
+        if [ "$has_task_assigned" = "1" ] && [ "$NEW_CONTEXT_SENT" -eq 0 ] && [ "$clear_seen" -eq 0 ]; then
+            send_context_reset
+            NEW_CONTEXT_SENT=1
         fi
 
         # Track when we first saw unread messages
@@ -732,6 +851,7 @@ for s in data.get('specials', []):
                     send_cli_command "/clear"
                     LAST_CLEAR_TS=$now
                     FIRST_UNREAD_SEEN=0  # Reset — will re-detect on next cycle
+                    NEW_CONTEXT_SENT=0
                 fi
             else
                 # Cooldown active — fall back to Escape+nudge
@@ -745,12 +865,13 @@ for s in data.get('specials', []):
             echo "[$(date)] All messages read for $AGENT_ID — escalation reset" >&2
         fi
         FIRST_UNREAD_SEEN=0
+        NEW_CONTEXT_SENT=0
         # Clear stale nudge text from input field (Codex CLI prefills last input on idle).
         # Only send C-u when agent is idle — during Working it would be disruptive.
         if ! agent_is_busy; then
             # Shogun is human-controlled; never clear the input line automatically.
             if [ "$AGENT_ID" != "shogun" ]; then
-                timeout 2 tmux send-keys -t "$PANE_TARGET" C-u 2>/dev/null
+                timeout 2 tmux send-keys -t "$PANE_TARGET" C-u 2>/dev/null || true
             fi
         fi
     fi
@@ -766,30 +887,43 @@ if [ "${__INBOX_WATCHER_TESTING__:-}" != "1" ]; then
 # ─── Startup: process any existing unread messages ───
 process_unread_once
 
-# ─── Main loop: event-driven via inotifywait/fswatch ───
+# ─── Main loop: event-driven via inotifywait ───
+# Timeout 30s: WSL2 /mnt/c/ can miss inotify events.
+# Shorter timeout = faster escalation retry for stuck agents.
 INOTIFY_TIMEOUT=30
 
 while true; do
+    # Block until file is modified OR timeout
+    # Backend-specific file watching: inotifywait (Linux) or fswatch (macOS)
     set +e
-    if [ "$FILE_WATCHER" = "fswatch" ]; then
-        # macOS: fswatch is unreliable with atomic writes (tmp+rename replaces inode).
-        # Use short polling interval instead — check every 2 seconds, timeout at INOTIFY_TIMEOUT.
-        local poll_elapsed=0
-        local last_mtime=""
-        last_mtime=$(stat -f %m "$INBOX" 2>/dev/null || echo "0")
-        rc=2  # default: timeout
-        while [ $poll_elapsed -lt $INOTIFY_TIMEOUT ]; do
-            sleep 2
-            poll_elapsed=$((poll_elapsed + 2))
-            local cur_mtime=""
-            cur_mtime=$(stat -f %m "$INBOX" 2>/dev/null || echo "0")
-            if [ "$cur_mtime" != "$last_mtime" ]; then
-                rc=0  # file changed
-                break
+    if [ "${WATCH_BACKEND:-inotifywait}" = "fswatch" ]; then
+        # macOS: fswatch -1 exits after one event. Use timeout for safety net.
+        # gtimeout (from coreutils) or perl fallback for macOS timeout
+        if command -v gtimeout &>/dev/null; then
+            gtimeout "$INOTIFY_TIMEOUT" fswatch -1 --event Updated --event Renamed "$INBOX" 2>/dev/null
+            rc=$?
+            # gtimeout returns 124 on timeout
+            if [ "$rc" -eq 124 ]; then rc=2; else rc=0; fi
+        else
+            # Fallback: use background fswatch + sleep timeout
+            fswatch -1 --event Updated --event Renamed "$INBOX" &>/dev/null &
+            FSWATCH_PID=$!
+            WAITED=0
+            while [ "$WAITED" -lt "$INOTIFY_TIMEOUT" ] && kill -0 "$FSWATCH_PID" 2>/dev/null; do
+                sleep 1
+                WAITED=$((WAITED + 1))
+            done
+            if kill -0 "$FSWATCH_PID" 2>/dev/null; then
+                kill "$FSWATCH_PID" 2>/dev/null
+                wait "$FSWATCH_PID" 2>/dev/null
+                rc=2  # timeout
+            else
+                wait "$FSWATCH_PID" 2>/dev/null
+                rc=0  # event
             fi
-        done
+        fi
     else
-        # Linux: inotifywait
+        # Linux: inotifywait (original behavior)
         inotifywait -q -t "$INOTIFY_TIMEOUT" -e modify -e close_write "$INBOX" 2>/dev/null
         rc=$?
     fi
@@ -799,8 +933,8 @@ while true; do
     # rc=1: watch invalidated — Claude Code uses atomic write (tmp+rename),
     #        which replaces the inode. inotifywait sees DELETE_SELF → rc=1.
     #        File still exists with new inode. Treat as event, re-watch next loop.
-    # rc=2: timeout (30s safety net for WSL2 inotify gaps)
-    # All cases: check for unread, then loop back to inotifywait (re-watches new inode)
+    # rc=2: timeout (30s safety net for WSL2 inotify gaps / macOS fswatch timeout)
+    # All cases: check for unread, then loop back (re-watches new inode)
     sleep 0.3
 
     if [ "$rc" -eq 2 ]; then
