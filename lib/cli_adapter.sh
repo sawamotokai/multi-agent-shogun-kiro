@@ -283,7 +283,7 @@ get_agent_model() {
             ;;
         kiro)
             # Kiro CLI用デフォルトモデル
-            echo "claude-opus-4.6"
+            echo "claude-opus-4.6-1m"
             ;;
         *)
             # Claude Code/Codex/Copilot用デフォルトモデル（kessen/heiji互換）
